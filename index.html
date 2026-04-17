@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#080d18">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>LEX ARCHIVUM · 書狀管理系統</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Firebase 9 Compat -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+
+  <!-- React 18 + Babel (no build step needed) -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body { background: #080d18; -webkit-font-smoothing: antialiased; }
+    input, textarea, button { font-family: inherit; }
+    input::placeholder, textarea::placeholder { color: #4a5a78; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #243248; border-radius: 2px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// ─────────────────────────────────────────────────────────
+//  Design tokens
+// ─────────────────────────────────────────────────────────
+const C = {
+  bg:      "#080d18", surface: "#0f1624", panel: "#16202e", card: "#1c2a3e",
+  border:  "#243248", borderL: "#2e4060",
+  gold:    "#c9a55a", goldDim: "#7a6030",
+  text:    "#dde4f0", textDim: "#8899b5", muted: "#4a5a78",
+  success: "#3dd68c", error: "#f06878", info: "#5aaaf0", warn: "#f5a623",
+};
+const FONT = "'PingFang TC','Microsoft JhengHei UI','Noto Sans TC',sans-serif";
+const CFG_KEY  = "lex:config_v2";
+const GDRIVE_MCP = [{ type:"url", url:"https://drivemcp.googleapis.com/mcp/v1", name:"google-drive" }];
+
+// ─────────────────────────────────────────────────────────
+//  Helpers
+// ─────────────────────────────────────────────────────────
+async function callClaude(system, user, apiKey) {
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers["x-api-key"]           = apiKey;
+    headers["anthropic-version"]   = "2023-06-01";
+    headers["anthropic-beta"]      = "mcp-client-2025-04-04";
+  }
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST", headers,
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4000, system,
+      messages: [{ role:"user", content: user }],
+      mcp_servers: GDRIVE_MCP,
+    }),
+  });
+  if (!res.ok) { const e = await res.json().catch(()=>{}); throw new Error(e?.error?.message || `API 錯誤 ${res.status}`); }
+  return res.json();
+}
+
+function extractText(data) {
+  return (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("");
+}
+function parseJSON(text) {
+  try { const m = text.replace(/```json|```/g,"").match(/\{[\s\S]*\}/); return m?JSON.parse(m[0]):null; }
+  catch { return null; }
+}
+function extractFolderId(input) {
+  if (!input) return null;
+  const m = input.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (m) return m[1];
+  if (/^[a-zA-Z0-9_-]{15,}$/.test(input.trim())) return input.trim();
+  return null;
+}
+function mergeUniq(a=[], b=[]) {
+  if (!b?.length) return a;
+  const r = [...a];
+  for (const item of b) {
+    const k = typeof item==="string"?item:JSON.stringify(item);
+    if (!r.some(x=>(typeof x==="string"?x:JSON.stringify(x))===k)) r.push(item);
+  }
+  return r;
+}
+function mergeData(prev, ext) {
+  if (!ext) return prev;
+  return {
+    訴之聲明:  mergeUniq(prev.訴之聲明,  ext.訴之聲明),
+    答辯聲明:  mergeUniq(prev.答辯聲明,  ext.答辯聲明),
+    請求權基礎: mergeUniq(prev.請求權基礎, ext.請求權基礎),
+    實務見解:  mergeUniq(prev.實務見解,  ext.實務見解),
+    判決結果:  ext.判決結果 || prev.判決結果,
+    法官心證:  mergeUniq(prev.法官心證,  ext.法官心證||[]),
+  };
+}
+function emptyData() {
+  return { 訴之聲明:[], 答辯聲明:[], 請求權基礎:[], 實務見解:[], 判決結果:null, 法官心證:[] };
+}
+
+// ─────────────────────────────────────────────────────────
+//  Firebase helpers (compat SDK)
+// ─────────────────────────────────────────────────────────
+function casesRef(uid) {
+  return firebase.firestore().collection("users").doc(uid).collection("cases");
+}
+async function fbSaveCase(uid, c) { await casesRef(uid).doc(c.id).set(c); }
+async function fbDeleteCase(uid, id) { await casesRef(uid).doc(id).delete(); }
+
+// ─────────────────────────────────────────────────────────
+//  Primitive UI components
+// ─────────────────────────────────────────────────────────
+function Btn({ onClick, disabled, variant="primary", small, full, children }) {
+  const bg    = variant==="primary"?C.gold : variant==="danger"?"#b02020" : "transparent";
+  const color = variant==="primary"?"#080d18" : variant==="danger"?"#fff" : C.textDim;
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      background: disabled?C.muted:bg, color: disabled?"#080d18":color,
+      border: variant==="ghost"?`1px solid ${C.border}`:"none",
+      borderRadius:6, padding: small?"6px 14px":"9px 20px",
+      fontSize: small?12:13, fontWeight:700, cursor: disabled?"not-allowed":"pointer",
+      opacity: disabled?0.5:1, width: full?"100%":"auto",
+      display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6,
+      fontFamily:FONT, transition:"opacity 0.15s",
+    }}>{children}</button>
+  );
+}
+function Input({ value, onChange, placeholder, type="text", style={}, onKeyDown }) {
+  return (
+    <input type={type} value={value} onChange={onChange} placeholder={placeholder} onKeyDown={onKeyDown}
+      style={{ width:"100%", background:C.panel, border:`1px solid ${C.border}`,
+        color:C.text, padding:"10px 12px", borderRadius:6, fontSize:14,
+        outline:"none", fontFamily:FONT, ...style }} />
+  );
+}
+function Textarea({ value, onChange, rows=8, placeholder, mono }) {
+  return (
+    <textarea value={value} onChange={onChange} rows={rows} placeholder={placeholder} style={{
+      width:"100%", background:C.panel, border:`1px solid ${C.border}`, color:C.text,
+      padding:"10px 12px", borderRadius:6, fontSize:12, outline:"none",
+      fontFamily: mono?"'SF Mono','Fira Code',monospace":FONT,
+      resize:"vertical", lineHeight:1.65,
+    }} />
+  );
+}
+function Badge({ color, children }) {
+  return (
+    <span style={{ background:color+"22", color, border:`1px solid ${color}44`,
+      borderRadius:4, padding:"2px 8px", fontSize:11, fontWeight:600,
+      display:"inline-flex", alignItems:"center" }}>{children}</span>
+  );
+}
+function SectionHeader({ label, style={} }) {
+  return (
+    <div style={{ fontSize:11, letterSpacing:3, color:C.gold, fontWeight:700,
+      marginBottom:12, display:"flex", alignItems:"center", gap:8, ...style }}>
+      <div style={{ flex:1, height:1, background:C.goldDim }} />{label}
+      <div style={{ flex:1, height:1, background:C.goldDim }} />
+    </div>
+  );
+}
+function EmptyState({ icon, msg, sub }) {
+  return (
+    <div style={{ textAlign:"center", padding:"70px 0", color:C.muted }}>
+      <div style={{ fontSize:44, marginBottom:14 }}>{icon}</div>
+      <div style={{ fontSize:15, color:C.textDim, marginBottom:6 }}>{msg}</div>
+      {sub && <div style={{ fontSize:12 }}>{sub}</div>}
+    </div>
+  );
+}
+function Spinner() {
+  return <div style={{ width:16, height:16, border:`2px solid ${C.border}`, borderTopColor:C.gold, borderRadius:"50%", animation:"spin 0.8s linear infinite" }} />;
+}
+function ErrorBox({ msg }) {
+  return msg ? (
+    <div style={{ background:"#f0687820", border:`1px solid ${C.error}44`, borderRadius:6,
+      padding:"10px 14px", color:C.error, fontSize:13, marginBottom:16 }}>{msg}</div>
+  ) : null;
+}
+
+// ─────────────────────────────────────────────────────────
+//  ① Config Screen  (first-time setup)
+// ─────────────────────────────────────────────────────────
+function ConfigScreen({ onSaved }) {
+  const [fbJson, setFbJson] = useState(`{
+  "apiKey": "",
+  "authDomain": "你的projectid.firebaseapp.com",
+  "projectId": "你的projectid",
+  "storageBucket": "你的projectid.appspot.com",
+  "messagingSenderId": "",
+  "appId": ""
+}`);
+  const [apiKey, setApiKey] = useState("");
+  const [err, setErr] = useState("");
+
+  function save() {
+    try {
+      const fbConfig = JSON.parse(fbJson);
+      if (!fbConfig.apiKey || !fbConfig.projectId) throw new Error("Firebase config 不完整，請確認已填入 apiKey 和 projectId");
+      if (!apiKey.trim().startsWith("sk-ant")) throw new Error("Anthropic API Key 格式不正確（應以 sk-ant- 開頭）");
+      onSaved({ fbConfig, anthropicKey: apiKey.trim() });
+    } catch(e) { setErr(e.message); }
+  }
+
+  return (
+    <div style={{ minHeight:"100vh", background:C.bg, display:"flex", alignItems:"center",
+      justifyContent:"center", fontFamily:FONT, padding:16 }}>
+      <div style={{ width:"100%", maxWidth:520, background:C.surface, border:`1px solid ${C.borderL}`,
+        borderRadius:16, padding:36 }}>
+        <div style={{ textAlign:"center", marginBottom:32 }}>
+          <div style={{ fontSize:10, letterSpacing:6, color:C.gold, fontWeight:700, marginBottom:10 }}>LEX ARCHIVUM</div>
+          <div style={{ fontSize:22, color:C.text, fontWeight:700, marginBottom:8 }}>初次設定</div>
+          <div style={{ fontSize:13, color:C.textDim, lineHeight:1.7 }}>
+            設定儲存於本機 localStorage，不會上傳至任何伺服器
+          </div>
+        </div>
+
+        <label style={{ display:"block", fontSize:11, color:C.textDim, marginBottom:6, letterSpacing:1 }}>
+          FIREBASE CONFIG（JSON） — 從 Firebase Console → 專案設定 → 你的應用程式複製
+        </label>
+        <Textarea value={fbJson} onChange={e=>setFbJson(e.target.value)} rows={9} mono />
+        <div style={{ height:16 }} />
+
+        <label style={{ display:"block", fontSize:11, color:C.textDim, marginBottom:6, letterSpacing:1 }}>
+          ANTHROPIC API KEY — 從 console.anthropic.com 取得
+        </label>
+        <Input value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="sk-ant-api03-..." type="password" />
+        <p style={{ fontSize:11, color:C.muted, marginTop:6, lineHeight:1.6, marginBottom:24 }}>
+          此 Key 僅存於您的瀏覽器，用於呼叫 Anthropic API 分析書狀
+        </p>
+
+        <ErrorBox msg={err} />
+        <Btn onClick={save} full>儲存並繼續</Btn>
+
+        <div style={{ marginTop:20, padding:14, background:C.panel, borderRadius:8, fontSize:11, color:C.muted, lineHeight:1.8 }}>
+          <strong style={{ color:C.textDim }}>部署前請確認：</strong><br/>
+          1. Firebase Console → Authentication → 啟用 Google 登入<br/>
+          2. Firebase Console → Firestore → 建立資料庫（Production mode）<br/>
+          3. Firestore 安全規則請參考 README.md<br/>
+          4. Firebase Console → Authentication → 授權網域 → 加入 your-username.github.io
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────
+//  ② Auth Screen
+// ─────────────────────────────────────────────────────────
+function AuthScreen() {
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function signIn() {
+    setLoading(true); setErr("");
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await firebase.auth().signInWithPopup(provider);
+    } catch(e) {
+      setErr(e.code === "auth/popup-blocked"
+        ? "彈出視窗被封鎖，請允許此網站的彈出視窗後重試"
+        : e.message);
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ height:"100vh", background:C.bg, display:"flex", alignItems:"center",
+      justifyContent:"center", fontFamily:FONT, padding:16 }}>
+      <div style={{ width:"100%", maxWidth:380, background:C.surface, border:`1px solid ${C.borderL}`,
+        borderRadius:16, padding:40, textAlign:"center" }}>
+        <div style={{ fontSize:52, marginBottom:16 }}>⚖️</div>
+        <div style={{ fontSize:10, letterSpacing:6, color:C.gold, fontWeight:700, marginBottom:8 }}>LEX ARCHIVUM</div>
+        <div style={{ fontSize:20, color:C.text, fontWeight:700, marginBottom:6 }}>書狀智慧管理系統</div>
+        <div style={{ fontSize:13, color:C.textDim, marginBottom:32 }}>案件資料加密存於您的 Firebase</div>
+        <ErrorBox msg={err} />
+        <button onClick={signIn} disabled={loading} style={{
+          width:"100%", background:"#fff", color:"#1f1f1f", border:"none", borderRadius:8,
+          padding:"12px 20px", fontSize:14, fontWeight:600, cursor:loading?"not-allowed":"pointer",
+          display:"flex", alignItems:"center", justifyContent:"center", gap:12,
+          opacity:loading?0.6:1, fontFamily:FONT,
+        }}>
+          {loading ? <Spinner /> : (
+            <svg width="18" height="18" viewBox="0 0 24 24">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+            </svg>
+          )}
+          {loading ? "登入中..." : "使用 Google 帳號登入"}
+        </button>
+        <p style={{ fontSize:11, color:C.muted, marginTop:20, lineHeight:1.6 }}>
+          所有案件資料儲存於您自己的 Firebase Firestore<br/>跨裝置即時同步，不經第三方
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────
+//  TopBar
+// ─────────────────────────────────────────────────────────
+function TopBar({ user, onBack, title, right, badge }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  return (
+    <div style={{ background:C.surface, borderBottom:`1px solid ${C.border}`, padding:"0 16px",
+      display:"flex", alignItems:"center", gap:10, height:54, flexShrink:0, position:"relative", zIndex:10 }}>
+      {onBack && (
+        <button onClick={onBack} style={{ background:"transparent", border:"none", color:C.textDim,
+          cursor:"pointer", fontSize:22, padding:"0 4px", lineHeight:1 }}>‹</button>
+      )}
+      <span style={{ fontSize:10, letterSpacing:4, color:C.gold, fontWeight:700, flexShrink:0 }}>LEX</span>
+      {title && <>
+        <span style={{ color:C.border }}>｜</span>
+        <span style={{ fontSize:14, fontWeight:600, color:C.text, flex:1,
+          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{title}</span>
+      </>}
+      {!title && <div style={{ flex:1 }} />}
+      {badge && <span style={{ fontSize:12, color:C.textDim, flexShrink:0 }}>{badge}</span>}
+      {right}
+      {user && (
+        <div style={{ position:"relative" }}>
+          <button onClick={()=>setMenuOpen(p=>!p)} style={{
+            width:32, height:32, borderRadius:"50%", overflow:"hidden",
+            border:`2px solid ${C.gold}`, cursor:"pointer", padding:0, background:C.card,
+            display:"flex", alignItems:"center", justifyContent:"center",
+          }}>
+            {user.photoURL
+              ? <img src={user.photoURL} width={32} height={32} referrerPolicy="no-referrer" style={{ display:"block" }} />
+              : <span style={{ color:C.gold, fontSize:14, fontWeight:700 }}>
+                  {(user.displayName||user.email||"?")[0].toUpperCase()}
+                </span>
+            }
+          </button>
+          {menuOpen && (
+            <div style={{ position:"absolute", right:0, top:40, background:C.card,
+              border:`1px solid ${C.border}`, borderRadius:10, padding:8, minWidth:190, zIndex:999,
+              boxShadow:"0 8px 32px rgba(0,0,0,0.5)" }}>
+              <div style={{ fontSize:12, color:C.textDim, padding:"6px 10px", borderBottom:`1px solid ${C.border}`, marginBottom:6 }}>
+                {user.displayName||user.email}
+              </div>
+              <button onClick={()=>{ localStorage.removeItem(CFG_KEY); location.reload(); }}
+                style={{ width:"100%", background:"transparent", border:"none", color:C.textDim,
+                  padding:"8px 10px", textAlign:"left", fontSize:13, fontFamily:FONT, cursor:"pointer" }}>
+                ⚙ 重新設定
+              </button>
+              <button onClick={()=>{ firebase.auth().signOut(); setMenuOpen(false); }}
+                style={{ width:"100%", background:"transparent", border:"none", color:C.error,
+                  padding:"8px 10px", textAlign:"left", fontSize:13, fontFamily:FONT, cursor:"pointer" }}>
+                登出
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────
+//  ③ Case Screen
+// ─────────────────────────────────────────────────────────
+const TABS = [
+  { key:"訴之聲明",  icon:"📋", color:C.info },
+  { key:"答辯聲明",  icon:"🛡️", color:C.warn },
+  { key:"請求權基礎", icon:"⚖️", color:C.gold },
+  { key:"實務見解",  icon:"📚", color:"#a78bfa" },
+  { key:"判決分析",  icon:"🏛️", color:C.success },
+];
+
+function CaseScreen({ user, caseObj: initialCase, anthropicKey, onBack }) {
+  const [files, setFiles]       = useState(initialCase.files||[]);
+  const [caseData, setCaseData] = useState(initialCase.caseData||emptyData());
+  const [activeTab, setActiveTab] = useState("訴之聲明");
+  const [log, setLog]           = useState([]);
+  const [processing, setProcessing] = useState(false);
+  const [processIdx, setProcessIdx] = useState(-1);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const logRef = useRef(null);
+  const processingRef = useRef(false);
+
+  useEffect(() => { if(logRef.current) logRef.current.scrollTop=logRef.current.scrollHeight; }, [log]);
+
+  // Real-time sync from other devices (only when not actively processing locally)
+  useEffect(() => {
+    const unsub = casesRef(user.uid).doc(initialCase.id).onSnapshot(snap => {
+      if (snap.exists && !processingRef.current) {
+        const d = snap.data();
+        if (d.files)    setFiles(d.files);
+        if (d.caseData) setCaseData(d.caseData);
+      }
+    });
+    return unsub;
+  }, [initialCase.id, user.uid]);
+
+  const addLog = useCallback((msg, type="info") => {
+    const t = new Date().toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+    setLog(prev=>[...prev.slice(-300),{msg,type,t}]);
+  },[]);
+
+  async function processOneFile(file, idx, accumulated) {
+    addLog(`▶ ${file.name}`, "info");
+    setProcessIdx(idx);
+    try {
+      const data = await callClaude(
+        `你是專業台灣法律助理，精通民事訴訟法、書狀分析與實務判決。
+請讀取 Google Drive 中的指定檔案（PDF 或 Word），提取所有法律要素。
+只回傳純JSON，不含任何markdown標記、前言或說明文字。`,
+        `請讀取 Google Drive 檔案（ID: "${file.id}"，檔名: "${file.name}"），提取：
+{
+  "document_type": "原告書狀/被告書狀/判決書/聲請狀/其他",
+  "訴之聲明": ["一、被告應給付...","二、訴訟費用由被告負擔"],
+  "答辯聲明": ["一、原告之訴駁回","二、訴訟費用由原告負擔"],
+  "請求權基礎": ["民法第XXX條（說明：事由及適用理由）"],
+  "實務見解": [{"案號":"最高法院XX年台上字第XXXX號判決","要旨":"判決要旨...","引用方":"原告"}],
+  "判決結果": null,
+  "法官心證": null
+}
+若為判決書，"判決結果"改為：{"主文":"完整主文","勝訴方":"原告/被告/部分勝訴","理由摘要":"（300字內）"}
+"法官心證"改為：["法官採信/不採信原因1","心證事項2",...]
+無對應欄位一律填 null 或 []。`,
+        anthropicKey
+      );
+      const extracted = parseJSON(extractText(data));
+      const updatedFile = { ...file, status: extracted?"done":"error", extracted };
+      setFiles(prev=>{ const a=[...prev]; a[idx]=updatedFile; return a; });
+      addLog(`✓ ${file.name}（${extracted?.document_type||"未知類型"}）`, "success");
+      return { updatedFile, extracted };
+    } catch(e) {
+      const updatedFile = { ...file, status:"error" };
+      setFiles(prev=>{ const a=[...prev]; a[idx]=updatedFile; return a; });
+      addLog(`✗ ${file.name}：${e.message}`, "error");
+      return { updatedFile, extracted: null };
+    }
+  }
+
+  async function processAll() {
+    setProcessing(true); processingRef.current = true; setLog([]);
+    let accumulated = { ...caseData };
+    const updatedFiles = [...files];
+
+    for (let i = 0; i < files.length; i++) {
+      const { updatedFile, extracted } = await processOneFile(files[i], i, accumulated);
+      updatedFiles[i] = updatedFile;
+      if (extracted) { accumulated = mergeData(accumulated, extracted); setCaseData({...accumulated}); }
+    }
+
+    setProcessIdx(-1); setProcessing(false); processingRef.current = false;
+    addLog("── 全部分析完成，儲存至 Firebase ──", "success");
+
+    const updated = { ...initialCase, files: updatedFiles, caseData: accumulated, updatedAt: new Date().toISOString() };
+    await fbSaveCase(user.uid, updated);
+  }
+
+  const doneCount = useMemo(()=>files.filter(f=>f.status==="done").length, [files]);
+  const errCount  = useMemo(()=>files.filter(f=>f.status==="error").length, [files]);
+  const pendCount = useMemo(()=>files.filter(f=>f.status==="pending").length, [files]);
+  const progress  = files.length ? Math.round(doneCount/files.length*100) : 0;
+
+  function TabContent() {
+    if (activeTab==="判決分析") {
+      if (!caseData.判決結果 && !caseData.法官心證?.length)
+        return <EmptyState icon="🏛️" msg="尚未讀取到判決書" sub="請將判決書加入 Drive 資料夾後點擊「開始分析」" />;
+      return (
+        <div>
+          {caseData.判決結果&&(<>
+            <SectionHeader label="判決主文" />
+            <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:10, padding:20, marginBottom:20 }}>
+              <pre style={{ margin:0, fontFamily:FONT, fontSize:14, lineHeight:2, color:C.text, whiteSpace:"pre-wrap" }}>
+                {caseData.判決結果.主文}
+              </pre>
+              {caseData.判決結果.勝訴方&&(
+                <div style={{ marginTop:12 }}>
+                  <Badge color={
+                    caseData.判決結果.勝訴方.includes("原告")?C.success:
+                    caseData.判決結果.勝訴方.includes("被告")?C.error:C.warn
+                  }>{caseData.判決結果.勝訴方}</Badge>
+                </div>
+              )}
+            </div>
+            {caseData.判決結果.理由摘要&&(<>
+              <SectionHeader label="理由摘要" />
+              <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:10, padding:20, marginBottom:20 }}>
+                <p style={{ margin:0, fontSize:14, lineHeight:2, color:C.text }}>{caseData.判決結果.理由摘要}</p>
+              </div>
+            </>)}
+          </>)}
+          {caseData.法官心證?.length>0&&(<>
+            <SectionHeader label="法官心證" />
+            {caseData.法官心證.map((item,i)=>(
+              <div key={i} style={{ display:"flex", gap:14, padding:"14px 18px",
+                background:C.card, border:`1px solid ${C.border}`, borderRadius:8, marginBottom:8 }}>
+                <span style={{ color:C.gold, fontWeight:700, minWidth:22, fontSize:13 }}>{i+1}.</span>
+                <span style={{ fontSize:14, lineHeight:1.85, color:C.text }}>{item}</span>
+              </div>
+            ))}
+          </>)}
+        </div>
+      );
+    }
+    if (activeTab==="實務見解") {
+      if (!caseData.實務見解?.length) return <EmptyState icon="📚" msg="尚未擷取到實務見解" sub="請先分析文件" />;
+      return <div>{caseData.實務見解.map((item,i)=>(
+        <div key={i} style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:10, padding:18, marginBottom:12 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8, marginBottom:8 }}>
+            <div style={{ fontSize:13, color:"#a78bfa", fontWeight:700 }}>
+              {typeof item==="object"?item.案號:item}
+            </div>
+            {item.引用方&&<Badge color={item.引用方==="原告"?C.info:C.warn}>{item.引用方}引用</Badge>}
+          </div>
+          {item.要旨&&<p style={{ margin:0, fontSize:13, lineHeight:1.8, color:C.textDim }}>{item.要旨}</p>}
+        </div>
+      ))}</div>;
+    }
+    const items = caseData[activeTab]||[];
+    const tabColor = TABS.find(t=>t.key===activeTab)?.color||C.gold;
+    if (!items.length) return <EmptyState icon="📄" msg={`尚未擷取到${activeTab}`} sub="請先分析文件" />;
+    return <div>{items.map((item,i)=>(
+      <div key={i} style={{ display:"flex", gap:14, padding:"14px 18px", borderBottom:`1px solid ${C.border}` }}>
+        <span style={{ color:tabColor, fontWeight:700, minWidth:22, fontSize:13 }}>{i+1}.</span>
+        <span style={{ fontSize:14, lineHeight:2, color:C.text }}>{item}</span>
+      </div>
+    ))}</div>;
+  }
+
+  return (
+    <div style={{ height:"100vh", display:"flex", flexDirection:"column", fontFamily:FONT }}>
+      <TopBar user={user} onBack={onBack} title={initialCase.name}
+        badge={files.length>0?`${doneCount}/${files.length} 份 · ${progress}%`:null}
+        right={
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            <button onClick={()=>setSidebarOpen(p=>!p)} style={{
+              background:"transparent", border:"none", color:C.muted, cursor:"pointer",
+              fontSize:16, padding:"4px 6px", display:"none"
+            }} id="toggle-sidebar">☰</button>
+            <Btn onClick={processAll} disabled={processing||files.length===0} small>
+              {processing?<><Spinner/>分析中...</>:pendCount>0?`▶ 分析（${pendCount} 份）`:"▶ 重新分析"}
+            </Btn>
+          </div>
+        }
+      />
+
+      {/* Progress bar */}
+      <div style={{ height:2, background:C.border, flexShrink:0 }}>
+        <div style={{ height:"100%", width:`${progress}%`, background:C.gold, transition:"width 0.4s ease" }} />
+      </div>
+
+      <div style={{ flex:1, display:"flex", overflow:"hidden" }}>
+        {/* ── Sidebar ── */}
+        <div style={{ width:200, background:C.surface, borderRight:`1px solid ${C.border}`,
+          display:"flex", flexDirection:"column", flexShrink:0 }}>
+          <div style={{ padding:"10px 14px", fontSize:10, color:C.muted, letterSpacing:2,
+            borderBottom:`1px solid ${C.border}` }}>
+            文件清單{files.length>0&&` (${files.length})`}
+          </div>
+          <div style={{ flex:1, overflowY:"auto", padding:"4px 0" }}>
+            {files.length===0&&<div style={{ padding:"20px 14px", fontSize:11, color:C.muted }}>無文件</div>}
+            {files.map((file,i)=>(
+              <div key={file.id||i} style={{
+                padding:"7px 12px", display:"flex", alignItems:"center", gap:8,
+                background:processing&&processIdx===i?C.card:"transparent" }}>
+                <span style={{ fontSize:11, flexShrink:0, animation:processing&&processIdx===i?"pulse 1s infinite":"none",
+                  color:file.status==="done"?C.success:file.status==="error"?C.error:processing&&processIdx===i?C.info:C.muted }}>
+                  {file.status==="done"?"✓":file.status==="error"?"✗":processing&&processIdx===i?"●":"○"}
+                </span>
+                <span style={{ fontSize:11, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flex:1,
+                  color:file.status==="done"?C.text:file.status==="error"?C.error:C.textDim }}
+                  title={file.name}>{file.name}</span>
+              </div>
+            ))}
+          </div>
+          {files.length>0&&(
+            <div style={{ borderTop:`1px solid ${C.border}`, padding:"8px 12px", display:"flex", gap:6, flexWrap:"wrap" }}>
+              {doneCount>0&&<Badge color={C.success}>{doneCount} 完成</Badge>}
+              {errCount>0&&<Badge color={C.error}>{errCount} 失敗</Badge>}
+              {pendCount>0&&<Badge color={C.muted}>{pendCount} 待分析</Badge>}
+            </div>
+          )}
+          {/* Log panel */}
+          <div style={{ borderTop:`1px solid ${C.border}`, height:160, display:"flex", flexDirection:"column", flexShrink:0 }}>
+            <div style={{ padding:"6px 12px", fontSize:10, color:C.muted, letterSpacing:2 }}>LOG</div>
+            <div ref={logRef} style={{ flex:1, overflowY:"auto", padding:"0 10px 8px" }}>
+              {!log.length&&<div style={{ fontSize:10, color:C.muted }}>待分析...</div>}
+              {log.map((e,i)=>(
+                <div key={i} style={{ fontSize:10, lineHeight:1.5, marginBottom:2,
+                  color:e.type==="success"?C.success:e.type==="error"?C.error:C.textDim }}>
+                  <span style={{ color:C.muted }}>[{e.t}]</span> {e.msg}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Main panel ── */}
+        <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", minWidth:0 }}>
+          {/* Tab bar */}
+          <div style={{ display:"flex", borderBottom:`1px solid ${C.border}`, background:C.surface,
+            padding:"0 16px", flexShrink:0, overflowX:"auto" }}>
+            {TABS.map(tab=>{
+              const count = tab.key==="判決分析"?(caseData.判決結果?1:0):(caseData[tab.key]||[]).length;
+              return (
+                <button key={tab.key} onClick={()=>setActiveTab(tab.key)} style={{
+                  background:"transparent", border:"none",
+                  color:activeTab===tab.key?tab.color:C.muted,
+                  borderBottom:activeTab===tab.key?`2px solid ${tab.color}`:"2px solid transparent",
+                  padding:"12px 12px 10px", fontSize:13, fontFamily:FONT, cursor:"pointer",
+                  fontWeight:activeTab===tab.key?700:400, marginBottom:-1, whiteSpace:"nowrap",
+                  display:"flex", alignItems:"center", gap:5,
+                }}>
+                  <span>{tab.icon}</span><span>{tab.key}</span>
+                  {count>0&&<span style={{ background:tab.color+"30", color:tab.color, borderRadius:10,
+                    padding:"1px 6px", fontSize:10, fontWeight:700 }}>{count}</span>}
+                </button>
+              );
+            })}
+          </div>
+          {/* Content */}
+          <div style={{ flex:1, overflowY:"auto", padding:"22px 24px" }}>
+            <TabContent />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────
+//  ④ Home Screen
+// ─────────────────────────────────────────────────────────
+function HomeScreen({ user, cases, anthropicKey }) {
+  const [modal, setModal]     = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newUrl, setNewUrl]   = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [scanErr, setScanErr] = useState("");
+  const [selected, setSelected] = useState(null);
+
+  if (selected) return (
+    <CaseScreen user={user} caseObj={selected} anthropicKey={anthropicKey}
+      onBack={()=>setSelected(null)} />
+  );
+
+  async function createCase() {
+    const folderId = extractFolderId(newUrl);
+    if (!newName.trim()) { setScanErr("請輸入案件名稱"); return; }
+    if (!folderId) { setScanErr("無法識別資料夾連結，請貼上完整的 Google Drive 資料夾網址"); return; }
+    setScanning(true); setScanErr("");
+    try {
+      const data = await callClaude(
+        "你是法律文件管理系統。只回傳純JSON，不要任何markdown或說明文字。",
+        `請列出 Google Drive 資料夾（ID: "${folderId}"）中的所有檔案。
+格式：{"files":[{"id":"...","name":"...","mimeType":"..."}]}`,
+        anthropicKey
+      );
+      const parsed = parseJSON(extractText(data));
+      const fileList = parsed?.files||[];
+      if (!fileList.length) throw new Error("未找到任何檔案。請確認：1) 資料夾ID正確 2) Google Drive 已授權 3) 資料夾中有檔案");
+
+      const newCase = {
+        id: `case-${Date.now()}`,
+        name: newName.trim(), folderId, folderUrl: newUrl.trim(),
+        createdAt: new Date().toISOString(), caseData: emptyData(),
+        files: fileList.map(f=>({...f, status:"pending", extracted:null})),
+      };
+      await fbSaveCase(user.uid, newCase);
+      setModal(false); setNewName(""); setNewUrl("");
+      setSelected(newCase);
+    } catch(e) { setScanErr(e.message); }
+    setScanning(false);
+  }
+
+  return (
+    <div style={{ height:"100vh", display:"flex", flexDirection:"column", fontFamily:FONT }}>
+      <TopBar user={user} right={<Btn onClick={()=>setModal(true)}>＋ 新增案件</Btn>} />
+
+      <div style={{ flex:1, overflowY:"auto" }}>
+        <div style={{ maxWidth:780, margin:"0 auto", padding:"28px 20px" }}>
+          <h2 style={{ fontSize:20, fontWeight:700, color:C.text, marginBottom:4 }}>案件列表</h2>
+          <p style={{ fontSize:13, color:C.textDim, marginBottom:24 }}>
+            每個案件對應一個 Google Drive 資料夾 · 跨裝置即時同步
+          </p>
+
+          {cases.length===0 ? (
+            <div style={{ textAlign:"center", padding:"80px 0", color:C.muted,
+              border:`1px dashed ${C.border}`, borderRadius:12 }}>
+              <div style={{ fontSize:52, marginBottom:14 }}>⚖️</div>
+              <div style={{ fontSize:16, color:C.textDim, marginBottom:6 }}>尚未建立任何案件</div>
+              <div style={{ fontSize:12 }}>點擊右上角「新增案件」開始使用</div>
+            </div>
+          ) : (
+            <div style={{ display:"grid", gap:10 }}>
+              {cases.map(c=>{
+                const done  = (c.files||[]).filter(f=>f.status==="done").length;
+                const total = (c.files||[]).length;
+                return (
+                  <div key={c.id} onClick={()=>setSelected(c)} style={{
+                    background:C.surface, border:`1px solid ${C.border}`, borderRadius:10,
+                    padding:"16px 18px", cursor:"pointer", display:"flex", alignItems:"center", gap:14,
+                    transition:"border-color 0.15s",
+                  }}
+                  onMouseEnter={e=>e.currentTarget.style.borderColor=C.gold}
+                  onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+                    <div style={{ width:42, height:42, background:C.card, borderRadius:8, display:"flex",
+                      alignItems:"center", justifyContent:"center", fontSize:20, flexShrink:0 }}>⚖️</div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:15, fontWeight:600, color:C.text, marginBottom:5 }}>{c.name}</div>
+                      <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+                        <span style={{ fontSize:12, color:C.textDim }}>{total} 份文件，已分析 {done} 份</span>
+                        {c.caseData?.判決結果&&<Badge color={C.warn}>已有判決</Badge>}
+                        {done===total&&total>0&&<Badge color={C.success}>分析完成</Badge>}
+                        <span style={{ fontSize:11, color:C.muted }}>{new Date(c.createdAt).toLocaleDateString("zh-TW")}</span>
+                      </div>
+                    </div>
+                    <button onClick={async e=>{
+                      e.stopPropagation();
+                      if (confirm(`確定刪除「${c.name}」？此操作無法還原`)) await fbDeleteCase(user.uid, c.id);
+                    }} style={{ background:"transparent", border:"none", color:C.muted,
+                      cursor:"pointer", fontSize:16, padding:"4px 8px", borderRadius:4, flexShrink:0 }}
+                    title="刪除案件">✕</button>
+                    <span style={{ color:C.gold, fontSize:20, flexShrink:0 }}>›</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* New Case Modal */}
+      {modal&&(
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.75)", display:"flex",
+          alignItems:"center", justifyContent:"center", zIndex:200, padding:16 }}>
+          <div style={{ background:C.surface, border:`1px solid ${C.borderL}`, borderRadius:14,
+            padding:32, width:"100%", maxWidth:500, boxShadow:"0 24px 64px rgba(0,0,0,0.5)" }}>
+            <h3 style={{ margin:"0 0 24px", fontSize:17, color:C.text }}>建立新案件</h3>
+
+            <label style={{ display:"block", fontSize:11, color:C.textDim, marginBottom:6, letterSpacing:1 }}>案件名稱 *</label>
+            <Input value={newName} onChange={e=>setNewName(e.target.value)}
+              placeholder="例：王小明訴李大華損害賠償事件"
+              onKeyDown={e=>e.key==="Enter"&&createCase()}
+              style={{ marginBottom:16 }} />
+
+            <label style={{ display:"block", fontSize:11, color:C.textDim, marginBottom:6, letterSpacing:1 }}>Google Drive 資料夾連結 *</label>
+            <Input value={newUrl} onChange={e=>setNewUrl(e.target.value)}
+              placeholder="https://drive.google.com/drive/folders/..."
+              onKeyDown={e=>e.key==="Enter"&&createCase()}
+              style={{ marginBottom:8 }} />
+            <p style={{ fontSize:11, color:C.muted, margin:"0 0 20px", lineHeight:1.7 }}>
+              請將此案件所有書狀（PDF / Word）放入同一個 Google Drive 資料夾，
+              並確認已在 Claude.ai 設定頁面連接 Google Drive MCP
+            </p>
+
+            <ErrorBox msg={scanErr} />
+            <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
+              <Btn variant="ghost" onClick={()=>{ setModal(false); setScanErr(""); }}>取消</Btn>
+              <Btn onClick={createCase} disabled={scanning}>
+                {scanning?<><Spinner/>掃描中...</>:"建立並掃描"}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────
+//  ⑤ App Root
+// ─────────────────────────────────────────────────────────
+function App() {
+  const [config, setConfig]         = useState(null);
+  const [fbReady, setFbReady]       = useState(false);
+  const [user, setUser]             = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [cases, setCases]           = useState([]);
+  const [fbError, setFbError]       = useState("");
+
+  // Load config from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(CFG_KEY);
+    if (saved) {
+      try { setConfig(JSON.parse(saved)); }
+      catch { localStorage.removeItem(CFG_KEY); }
+    }
+  }, []);
+
+  // Save config and init Firebase
+  function handleConfigSaved(cfg) {
+    localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+    setConfig(cfg);
+  }
+
+  useEffect(() => {
+    if (!config) return;
+    try {
+      if (!firebase.apps.length) firebase.initializeApp(config.fbConfig);
+      // Persistence for mobile (IndexedDB)
+      firebase.firestore().enablePersistence({ synchronizeTabs: true }).catch(()=>{});
+      setFbReady(true);
+    } catch(e) {
+      setFbError(`Firebase 初始化失敗：${e.message}`);
+    }
+  }, [config]);
+
+  // Auth state
+  useEffect(() => {
+    if (!fbReady) return;
+    const unsub = firebase.auth().onAuthStateChanged(u => {
+      setUser(u); setAuthChecked(true);
+    });
+    return unsub;
+  }, [fbReady]);
+
+  // Cases real-time listener
+  useEffect(() => {
+    if (!user || !fbReady) return;
+    const unsub = casesRef(user.uid).orderBy("createdAt","desc").onSnapshot(snap => {
+      setCases(snap.docs.map(d=>({ id:d.id, ...d.data() })));
+    }, err => console.error("Firestore error:", err));
+    return unsub;
+  }, [user, fbReady]);
+
+  // ── Render ──
+  if (!config) return <ConfigScreen onSaved={handleConfigSaved} />;
+
+  if (fbError) return (
+    <div style={{ height:"100vh", background:C.bg, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:FONT, padding:16 }}>
+      <div style={{ maxWidth:480, textAlign:"center" }}>
+        <div style={{ fontSize:42, marginBottom:16 }}>⚠️</div>
+        <div style={{ color:C.error, fontSize:14, marginBottom:20, lineHeight:1.7 }}>{fbError}</div>
+        <Btn onClick={()=>{ localStorage.removeItem(CFG_KEY); location.reload(); }} variant="ghost">重新設定</Btn>
+      </div>
+    </div>
+  );
+
+  if (!fbReady || !authChecked) return (
+    <div style={{ height:"100vh", background:C.bg, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:FONT }}>
+      <div style={{ textAlign:"center" }}>
+        <div style={{ fontSize:10, letterSpacing:6, color:C.gold, fontWeight:700, marginBottom:20 }}>LEX ARCHIVUM</div>
+        <Spinner />
+        <div style={{ fontSize:12, color:C.muted, marginTop:14 }}>連接 Firebase...</div>
+      </div>
+    </div>
+  );
+
+  if (!user) return <AuthScreen />;
+
+  return <HomeScreen user={user} cases={cases} anthropicKey={config.anthropicKey} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+
+// PWA Service Worker registration
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch(()=>{});
+}
+</script>
+</body>
+</html>
