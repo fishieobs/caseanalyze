@@ -4,6 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>法律知識庫</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2316213e'/%3E%3Crect x='10' y='10' width='18' height='80' rx='3' fill='%23c9a84c'/%3E%3Crect x='26' y='10' width='64' height='80' rx='2' fill='%231a2744'/%3E%3Crect x='26' y='10' width='64' height='4' rx='2' fill='%23c9a84c'/%3E%3Crect x='26' y='86' width='64' height='4' rx='2' fill='%23c9a84c'/%3E%3Crect x='33' y='18' width='50' height='64' rx='1' fill='none' stroke='%23c9a84c' stroke-width='1'/%3E%3Cg transform='translate(58,44)'%3E%3Crect x='-0.5' y='0' width='1' height='18' fill='%23c9a84c'/%3E%3Crect x='-14' y='0' width='28' height='1.2' rx='0.6' fill='%23c9a84c'/%3E%3Ccircle cx='0' cy='-3' r='2.5' fill='%23c9a84c'/%3E%3Cline x1='-14' y1='1' x2='-10' y2='13' stroke='%23c9a84c' stroke-width='1'/%3E%3Cline x1='-10' y1='1' x2='-10' y2='13' stroke='%23c9a84c' stroke-width='1'/%3E%3Cpath d='M-17 13 Q-10 10 -3 13' fill='none' stroke='%23c9a84c' stroke-width='1.5'/%3E%3Cline x1='14' y1='1' x2='10' y2='13' stroke='%23c9a84c' stroke-width='1'/%3E%3Cline x1='10' y1='1' x2='10' y2='13' stroke='%23c9a84c' stroke-width='1'/%3E%3Cpath d='M3 13 Q10 10 17 13' fill='none' stroke='%23c9a84c' stroke-width='1.5'/%3E%3C/g%3E%3Crect x='36' y='70' width='38' height='2.5' rx='1.2' fill='%23c9a84c'/%3E%3Crect x='40' y='75' width='30' height='1.8' rx='0.9' fill='%23c9a84c' opacity='.5'/%3E%3C/svg%3E"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
@@ -43,7 +44,7 @@ body{font-family:'Noto Sans TC',sans-serif;background:var(--parch);color:var(--i
 
 /* ── SIDEBAR ── */
 .sb{width:260px;min-width:260px;background:var(--ink);display:flex;flex-direction:column;overflow:hidden;}
-.sb-logo{padding:18px 16px 14px;border-bottom:1px solid rgba(201,168,76,0.25);}
+.sb-logo{padding:14px 16px 12px;border-bottom:1px solid rgba(201,168,76,0.25);display:flex;align-items:center;gap:11px;}
 .sb-logo-title{font-family:'Noto Serif TC',serif;font-size:13px;font-weight:700;color:var(--gold);letter-spacing:3px;}
 .sb-logo-sub{font-size:10px;color:rgba(255,255,255,0.3);margin-top:2px;letter-spacing:1px;}
 .sb-search{padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.06);}
@@ -531,8 +532,34 @@ function App() {
       {/* ── SIDEBAR ── */}
       <div className="sb">
         <div className="sb-logo">
-          <div className="sb-logo-title">法律知識庫</div>
-          <div className="sb-logo-sub">Legal Knowledge Base</div>
+          <svg width="34" height="40" viewBox="0 0 100 120" xmlns="http://www.w3.org/2000/svg" style={{flexShrink:0}}>
+            <rect x="0" y="0" width="28" height="120" rx="4" fill="#c9a84c"/>
+            <rect x="4" y="14" width="20" height="2" rx="1" fill="#0a1535" opacity="0.4"/>
+            <rect x="4" y="22" width="20" height="2" rx="1" fill="#0a1535" opacity="0.4"/>
+            <rect x="4" y="98" width="20" height="2" rx="1" fill="#0a1535" opacity="0.4"/>
+            <rect x="4" y="106" width="20" height="2" rx="1" fill="#0a1535" opacity="0.4"/>
+            <rect x="24" y="0" width="76" height="120" rx="3" fill="#16213e"/>
+            <rect x="24" y="0" width="76" height="5" rx="3" fill="#c9a84c"/>
+            <rect x="24" y="115" width="76" height="5" rx="3" fill="#c9a84c"/>
+            <rect x="34" y="10" width="56" height="100" rx="2" fill="none" stroke="#c9a84c" strokeWidth="1" opacity="0.4"/>
+            <g transform="translate(62,44)">
+              <rect x="-0.8" y="0" width="1.6" height="22" fill="#c9a84c"/>
+              <rect x="-18" y="0" width="36" height="1.6" rx="0.8" fill="#c9a84c"/>
+              <circle cx="0" cy="-4" r="3.5" fill="#c9a84c"/>
+              <line x1="-18" y1="1.6" x2="-13" y2="18" stroke="#c9a84c" strokeWidth="1.2"/>
+              <line x1="-13" y1="1.6" x2="-13" y2="18" stroke="#c9a84c" strokeWidth="1.2"/>
+              <path d="M-22 18 Q-13 14 -4 18" fill="none" stroke="#c9a84c" strokeWidth="1.8"/>
+              <line x1="18" y1="1.6" x2="13" y2="18" stroke="#c9a84c" strokeWidth="1.2"/>
+              <line x1="13" y1="1.6" x2="13" y2="18" stroke="#c9a84c" strokeWidth="1.2"/>
+              <path d="M4 18 Q13 14 22 18" fill="none" stroke="#c9a84c" strokeWidth="1.8"/>
+            </g>
+            <rect x="40" y="80" width="44" height="3" rx="1.5" fill="#c9a84c" opacity="0.85"/>
+            <rect x="45" y="87" width="34" height="2" rx="1" fill="#c9a84c" opacity="0.45"/>
+          </svg>
+          <div>
+            <div className="sb-logo-title">法律知識庫</div>
+            <div className="sb-logo-sub">Legal Knowledge Base</div>
+          </div>
         </div>
         <div className="sb-search">
           <input placeholder="搜尋案由…" value={search} onChange={e=>setSearch(e.target.value)}/>
@@ -581,8 +608,36 @@ function App() {
       <div className="main">
         {!selSc ? (
           <div className="home">
-            <div className="home-title">法律知識庫</div>
-            <div className="home-sub">選擇左側案由，或點選下方大類瀏覽</div>
+            <div style={{display:"flex",alignItems:"center",gap:16,marginBottom:20}}>
+              <svg width="56" height="68" viewBox="0 0 100 120" xmlns="http://www.w3.org/2000/svg">
+                <rect x="0" y="0" width="28" height="120" rx="4" fill="#c9a84c"/>
+                <rect x="4" y="14" width="20" height="2.5" rx="1" fill="#0a1535" opacity="0.4"/>
+                <rect x="4" y="22" width="20" height="2.5" rx="1" fill="#0a1535" opacity="0.4"/>
+                <rect x="4" y="98" width="20" height="2.5" rx="1" fill="#0a1535" opacity="0.4"/>
+                <rect x="4" y="106" width="20" height="2.5" rx="1" fill="#0a1535" opacity="0.4"/>
+                <rect x="24" y="0" width="76" height="120" rx="3" fill="#16213e"/>
+                <rect x="24" y="0" width="76" height="5" rx="3" fill="#c9a84c"/>
+                <rect x="24" y="115" width="76" height="5" rx="3" fill="#c9a84c"/>
+                <rect x="34" y="10" width="56" height="100" rx="2" fill="none" stroke="#c9a84c" strokeWidth="1" opacity="0.45"/>
+                <g transform="translate(62,44)">
+                  <rect x="-0.8" y="0" width="1.6" height="22" fill="#c9a84c"/>
+                  <rect x="-18" y="0" width="36" height="1.6" rx="0.8" fill="#c9a84c"/>
+                  <circle cx="0" cy="-4" r="3.5" fill="#c9a84c"/>
+                  <line x1="-18" y1="1.6" x2="-13" y2="18" stroke="#c9a84c" strokeWidth="1.2"/>
+                  <line x1="-13" y1="1.6" x2="-13" y2="18" stroke="#c9a84c" strokeWidth="1.2"/>
+                  <path d="M-22 18 Q-13 14 -4 18" fill="none" stroke="#c9a84c" strokeWidth="1.8"/>
+                  <line x1="18" y1="1.6" x2="13" y2="18" stroke="#c9a84c" strokeWidth="1.2"/>
+                  <line x1="13" y1="1.6" x2="13" y2="18" stroke="#c9a84c" strokeWidth="1.2"/>
+                  <path d="M4 18 Q13 14 22 18" fill="none" stroke="#c9a84c" strokeWidth="1.8"/>
+                </g>
+                <rect x="40" y="80" width="44" height="3" rx="1.5" fill="#c9a84c" opacity="0.85"/>
+                <rect x="45" y="87" width="34" height="2" rx="1" fill="#c9a84c" opacity="0.45"/>
+              </svg>
+              <div>
+                <div className="home-title" style={{marginBottom:4}}>法律知識庫</div>
+                <div className="home-sub" style={{margin:0}}>選擇左側案由，或點選下方大類瀏覽</div>
+              </div>
+            </div>
             <div className="bc-grid">
               {BIG_CATS.map(bc => {
                 const scs   = subcats.filter(s=>s.bigId===bc.id);
