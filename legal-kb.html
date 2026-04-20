@@ -3,6 +3,12 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="法律知識庫"/>
+<meta name="application-name" content="法律知識庫"/>
+<meta name="theme-color" content="#16213e"/>
 <title>法律知識庫</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2316213e'/%3E%3Crect x='10' y='10' width='18' height='80' rx='3' fill='%23c9a84c'/%3E%3Crect x='26' y='10' width='64' height='80' rx='2' fill='%231a2744'/%3E%3Crect x='26' y='10' width='64' height='4' rx='2' fill='%23c9a84c'/%3E%3Crect x='26' y='86' width='64' height='4' rx='2' fill='%23c9a84c'/%3E%3Crect x='33' y='18' width='50' height='64' rx='1' fill='none' stroke='%23c9a84c' stroke-width='1'/%3E%3Cg transform='translate(58,44)'%3E%3Crect x='-0.5' y='0' width='1' height='18' fill='%23c9a84c'/%3E%3Crect x='-14' y='0' width='28' height='1.2' rx='0.6' fill='%23c9a84c'/%3E%3Ccircle cx='0' cy='-3' r='2.5' fill='%23c9a84c'/%3E%3Cline x1='-14' y1='1' x2='-10' y2='13' stroke='%23c9a84c' stroke-width='1'/%3E%3Cline x1='-10' y1='1' x2='-10' y2='13' stroke='%23c9a84c' stroke-width='1'/%3E%3Cpath d='M-17 13 Q-10 10 -3 13' fill='none' stroke='%23c9a84c' stroke-width='1.5'/%3E%3Cline x1='14' y1='1' x2='10' y2='13' stroke='%23c9a84c' stroke-width='1'/%3E%3Cline x1='10' y1='1' x2='10' y2='13' stroke='%23c9a84c' stroke-width='1'/%3E%3Cpath d='M3 13 Q10 10 17 13' fill='none' stroke='%23c9a84c' stroke-width='1.5'/%3E%3C/g%3E%3Crect x='36' y='70' width='38' height='2.5' rx='1.2' fill='%23c9a84c'/%3E%3Crect x='40' y='75' width='30' height='1.8' rx='0.9' fill='%23c9a84c' opacity='.5'/%3E%3C/svg%3E"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
@@ -214,37 +220,59 @@ const DEFAULT_SUBCATS = [
 const uid = () => "id" + Date.now() + Math.random().toString(36).slice(2,6);
 const today = () => new Date().toLocaleDateString("zh-TW",{year:"numeric",month:"2-digit",day:"2-digit"});
 
-/* ─── FIRESTORE 持久化 ───
-   collection: "kb_data" / docs: "subcats","docs","judgments","opinions"
+/* ─── 雙層儲存：localStorage（即時）＋ Firestore（雲端同步）───
+   localStorage 保證資料不消失；Firestore 讓多裝置同步
+   Firestore 規則需允許讀寫：
+     match /kb_data/{doc} { allow read, write: if true; }
 ──────────────────────────────── */
 const KB_COL = "kb_data";
+const LS_PREFIX = "kb2_";
 
-async function fsGet(key) {
+// ── localStorage helpers ──
+function lsRead(key) {
+  try { const v = localStorage.getItem(LS_PREFIX+key); return v ? JSON.parse(v) : null; }
+  catch { return null; }
+}
+function lsWrite(key, val) {
+  try { localStorage.setItem(LS_PREFIX+key, JSON.stringify(val)); } catch {}
+}
+
+// ── Firestore helpers ──
+async function fsRead(key) {
   try {
     const snap = await db.collection(KB_COL).doc(key).get();
     return snap.exists ? snap.data().value : null;
-  } catch(e) { console.error("fsGet",e); return null; }
+  } catch(e) { console.warn("Firestore 讀取失敗（使用本機資料）:", e.code||e.message); return null; }
 }
-async function fsSet(key, val) {
+async function fsWrite(key, val) {
   try { await db.collection(KB_COL).doc(key).set({ value: val }); }
-  catch(e){ console.error("fsSet",e); }
+  catch(e) { console.warn("Firestore 寫入失敗（資料已存本機）:", e.code||e.message); }
 }
 
+// ── usePersist Hook ──
+// 1. 立即從 localStorage 讀取 → 畫面瞬間渲染，資料不消失
+// 2. 非同步從 Firestore 讀取 → 若有較新資料則更新並回寫 localStorage
+// 3. 儲存時同步寫入 localStorage + 非同步寫入 Firestore
 function usePersist(key, init) {
-  const [val, setVal]       = useState(init);
+  const [val, setVal]       = useState(() => { const v = lsRead(key); return v !== null ? v : init; });
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    fsGet(key).then(v => {
-      if (v !== null) setVal(v);
-      setLoaded(true);
+    setLoaded(true); // localStorage 已立即載入，直接標記完成
+    // 背景嘗試從 Firestore 同步
+    fsRead(key).then(v => {
+      if (v !== null) {
+        setVal(v);
+        lsWrite(key, v); // 回寫到 localStorage 保持同步
+      }
     });
   }, [key]);
 
   const update = (v) => {
     const next = typeof v === "function" ? v(val) : v;
     setVal(next);
-    fsSet(key, next);
+    lsWrite(key, next);   // 同步寫入本機（即時，不會失敗）
+    fsWrite(key, next);   // 非同步寫入雲端（有網路就同步）
   };
 
   return [val, update, loaded];
@@ -761,6 +789,123 @@ function App() {
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+
+<script>
+// ── 動態產生書本 PNG，設定為桌面 App Icon ──
+(function(){
+  const S = 512;
+  const c = document.createElement('canvas');
+  c.width = c.height = S;
+  const ctx = c.getContext('2d');
+  const s = S / 100; // scale factor
+
+  // 圓角底板
+  const r = 22 * s;
+  ctx.beginPath();
+  ctx.moveTo(r, 0); ctx.lineTo(S-r, 0);
+  ctx.quadraticCurveTo(S, 0, S, r);
+  ctx.lineTo(S, S-r); ctx.quadraticCurveTo(S, S, S-r, S);
+  ctx.lineTo(r, S); ctx.quadraticCurveTo(0, S, 0, S-r);
+  ctx.lineTo(0, r); ctx.quadraticCurveTo(0, 0, r, 0);
+  ctx.closePath();
+  ctx.fillStyle = '#16213e';
+  ctx.fill();
+
+  // 書脊（金色）
+  ctx.fillStyle = '#c9a84c';
+  ctx.beginPath();
+  ctx.roundRect(10*s, 10*s, 18*s, 80*s, 3*s);
+  ctx.fill();
+
+  // 書脊紋路
+  ctx.fillStyle = '#0a1535';
+  ctx.globalAlpha = 0.4;
+  [[14,2],[22,2],[74,2],[82,2]].forEach(([y,h])=>{
+    ctx.fillRect(14*s, y*s, 10*s, h*s);
+  });
+  ctx.globalAlpha = 1;
+
+  // 封面
+  ctx.fillStyle = '#1a2744';
+  ctx.beginPath();
+  ctx.roundRect(26*s, 10*s, 64*s, 80*s, [0, 3*s, 3*s, 0]);
+  ctx.fill();
+
+  // 封面頂底金條
+  ctx.fillStyle = '#c9a84c';
+  ctx.fillRect(26*s, 10*s, 64*s, 4*s);
+  ctx.fillRect(26*s, 86*s, 64*s, 4*s);
+
+  // 封面框線
+  ctx.strokeStyle = '#c9a84c';
+  ctx.lineWidth = 1*s;
+  ctx.globalAlpha = 0.45;
+  ctx.strokeRect(33*s, 18*s, 50*s, 64*s);
+  ctx.globalAlpha = 1;
+
+  // 天秤（金色）
+  const cx = 62*s, cy = 44*s;
+  ctx.strokeStyle = '#c9a84c';
+  ctx.fillStyle  = '#c9a84c';
+  ctx.lineWidth  = 1.2*s;
+  ctx.lineCap    = 'round';
+
+  // 支柱
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy+22*s); ctx.stroke();
+  // 橫梁
+  ctx.beginPath(); ctx.moveTo(cx-18*s, cy); ctx.lineTo(cx+18*s, cy); ctx.stroke();
+  // 頂端圓點
+  ctx.beginPath(); ctx.arc(cx, cy-4*s, 3.5*s, 0, Math.PI*2); ctx.fill();
+  // 左秤盤
+  ctx.beginPath(); ctx.moveTo(cx-18*s, cy+1.5*s); ctx.lineTo(cx-13*s, cy+18*s); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx-13*s, cy+1.5*s); ctx.lineTo(cx-13*s, cy+18*s); ctx.stroke();
+  ctx.lineWidth = 1.8*s;
+  ctx.beginPath(); ctx.moveTo(cx-22*s, cy+18*s); ctx.quadraticCurveTo(cx-13*s, cy+14*s, cx-4*s, cy+18*s); ctx.stroke();
+  // 右秤盤
+  ctx.lineWidth = 1.2*s;
+  ctx.beginPath(); ctx.moveTo(cx+18*s, cy+1.5*s); ctx.lineTo(cx+13*s, cy+18*s); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx+13*s, cy+1.5*s); ctx.lineTo(cx+13*s, cy+18*s); ctx.stroke();
+  ctx.lineWidth = 1.8*s;
+  ctx.beginPath(); ctx.moveTo(cx+4*s, cy+18*s); ctx.quadraticCurveTo(cx+13*s, cy+14*s, cx+22*s, cy+18*s); ctx.stroke();
+
+  // 文字線條
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = '#c9a84c';
+  ctx.beginPath(); ctx.roundRect(40*s, 80*s, 44*s, 3*s, 1.5*s); ctx.fill();
+  ctx.globalAlpha = 0.45;
+  ctx.beginPath(); ctx.roundRect(45*s, 86*s, 34*s, 2*s, 1*s); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  const png = c.toDataURL('image/png');
+
+  // Apple Touch Icon
+  const appleLink = document.createElement('link');
+  appleLink.rel  = 'apple-touch-icon';
+  appleLink.href = png;
+  document.head.appendChild(appleLink);
+
+  // Web App Manifest（Android / Chrome）
+  const manifest = {
+    name: '法律知識庫',
+    short_name: '法律知識庫',
+    description: '書狀庫、判決庫、實務見解管理系統',
+    start_url: location.href,
+    display: 'standalone',
+    orientation: 'portrait',
+    background_color: '#16213e',
+    theme_color: '#16213e',
+    icons: [
+      { src: png, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+    ]
+  };
+  const blob    = new Blob([JSON.stringify(manifest)], {type:'application/json'});
+  const mURL    = URL.createObjectURL(blob);
+  const mLink   = document.createElement('link');
+  mLink.rel     = 'manifest';
+  mLink.href    = mURL;
+  document.head.appendChild(mLink);
+})();
 </script>
 </body>
 </html>
